@@ -1,0 +1,44 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function signedIn() { return request.auth != null; }
+
+    // The one organiser. Email must be verified, so nobody can claim it by registering it with a password.
+    function isOrganiser() {
+      return signedIn()
+        && request.auth.token.email_verified == true
+        && request.auth.token.email == 'astikchaudhary2007@gmail.com';
+    }
+
+    // Public to read, organiser-only to change
+    match /matches/{id}   { allow read: if true; allow write: if isOrganiser(); }
+    match /standings/{id} { allow read: if true; allow write: if isOrganiser(); }
+
+    // Slot claims (id = booking id). Public counts; players can only claim for themselves.
+    match /claims/{id} {
+      allow read: if true;
+      allow create: if signedIn()
+        && request.resource.data.keys().hasOnly(['matchId','qty','at','uid'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.qty is int
+        && request.resource.data.qty >= 1 && request.resource.data.qty <= 10;
+      allow delete: if isOrganiser() || (signedIn() && resource.data.uid == request.auth.uid);
+    }
+
+    // Bookings: a player sees only their own, always starts as pending, and cannot mark themselves paid.
+    match /bookings/{id} {
+      allow read: if isOrganiser() || (signedIn() && resource.data.uid == request.auth.uid);
+      allow create: if signedIn()
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.status == 'pending'
+        && request.resource.data.id == id;
+      allow update, delete: if isOrganiser();
+    }
+
+    // Private player profiles
+    match /profiles/{uid} {
+      allow read, write: if signedIn() && request.auth.uid == uid;
+    }
+  }
+}

@@ -1,4 +1,4 @@
-/* Grand Kizara Esports: one page app with hash routes. Matches, bookings, slot counts and standings are live shared data kept in the artifact database. */
+/* Grand Kizara Esports: one page app with hash routes. Matches, bookings, slot counts and standings are live shared data kept in Firebase (Firestore + Authentication). */
 var CONFIG = { demoPayments: false, upiId: "astikchaudhary4687@oksbi", payeeName: "Grand Kizara" };
 var GAMES = { ff: "Free Fire", pubg: "PUBG", coc: "Clash of Clans" };
 
@@ -14,7 +14,7 @@ var SOCIALS = [
     icon:'<img src="logos/discord.png" alt="">' },
   { key:"youtube", name:"YouTube", handle:"@KAIZER_682", text:"Watch match highlights, live streams and tournament results.", url:"https://www.youtube.com/@KAIZER_682",
     icon:'<img src="logos/youtube.png" alt="">' },
-  { key:"instagram", name:"Instagram", handle:"@grand_kizara_4687", text:"Follow for match posters, winners and announcements.", url:"https://www.instagram.com/grand_kizara_4687?cplk=eGtiZXkzZTN2dG50",
+  { key:"instagram", name:"Instagram", handle:"@grand_kizara_esports", text:"Follow for match posters, winners and announcements.", url:"https://instagram.com/grand_kizara_esports?psln=eGtiZXkzZTN2dG50",
     icon:'<img src="logos/instagram.png" alt="">' }
 ];
 function socialLinks(cls){
@@ -70,7 +70,7 @@ function gameLogo(g, size){
 var MATCHES = [], CLAIMS = {}, STANDINGS = [], MY = [], ALLB = [];
 var PROFILE = null;
 var live = { ready:false, db:null, uid:null, name:"", email:"", avatar:"", isOwner:false, isEditor:false, canWrite:null, canAdmin:false, unlocked:false };
-var ORGCFG = null, ORGLOADED = false, ORG_EMAIL = "astikchaudhary2007@gmail.com";
+var ORG_EMAIL = "astikchaudhary2007@gmail.com"; /* display/UI gate only. The real lock is in firestore.rules */
 function orgUI(){ return live.canAdmin && live.unlocked; }
 function find(id){ return MATCHES.filter(function(m){return m.id===id;})[0]; }
 function recompute(){
@@ -81,61 +81,60 @@ function upcoming(){ var cut=Date.now()-3*3600*1000; return MATCHES.filter(funct
 function changed(){ recompute(); renderNav(); if(view && view.update) view.update(); }
 function oops(e){ toast("Live data error: "+((e&&e.code)||"unknown")); }
 
+var unsubUser = [];
+function userDown(){ unsubUser.forEach(function(f){ try{ f(); }catch(e){} }); unsubUser=[]; MY=[]; PROFILE=null; ALLB=[]; }
+function userUp(u){
+  userDown();
+  live.uid = u ? u.uid : null;
+  live.name = u ? (u.displayName||"") : "";
+  live.email = (u && u.email) ? u.email.toLowerCase() : "";
+  live.avatar = (u && u.photoURL) || "";
+  live.verified = !!(u && u.emailVerified);
+  /* Organiser tools show only for the verified organiser email. Firestore rules enforce the same check on the server. */
+  live.isOwner = !!u && live.verified && live.email===ORG_EMAIL;
+  live.canAdmin = live.isOwner; live.unlocked = live.isOwner; live.canWrite = !!u;
+  live.ready = true;
+  if(!u){ changed(); return; }
+  var db = live.db;
+  unsubUser.push(db.collection("bookings").where("uid","==",u.uid).onSnapshot(function(s){
+    MY = s.docs.map(function(d){ return d.data(); }).sort(function(a,b){ return String(b.at).localeCompare(String(a.at)); });
+    changed();
+  }, oops));
+  unsubUser.push(db.doc("profiles/"+u.uid).onSnapshot(function(s){ PROFILE = s.exists ? s.data() : null; changed(); }, oops));
+  if(live.canAdmin){
+    unsubUser.push(db.collection("bookings").onSnapshot(function(s){
+      ALLB = s.docs.map(function(d){ return d.data(); }).sort(function(a,b){ return String(b.at).localeCompare(String(a.at)); });
+      changed();
+    }, oops));
+  }
+  changed();
+}
 async function startLive(){
   try {
-    var db = window.claude && window.claude.use ? await window.claude.use("db") : null;
-    var user = window.claude && window.claude.use ? await window.claude.use("user") : null;
-    live.db = db;
-    if(user){
-      try {
-        var me = await user.me();
-        live.uid = me.id || null; live.name = me.name || ""; live.email = (me.email || "").toLowerCase(); live.avatar = me.avatarUrl || "";
-        live.isOwner = me.isOwner === true; live.isEditor = me.canEdit === true;
-      } catch(e) {}
-      /* Organiser tools show only for the account that owns this page. */
-      live.canAdmin = live.isOwner;
-      try { live.canWrite = await user.can("data.write"); } catch(e) {}
-    }
-    live.ready = true;
-    if(!db){ changed(); return; }
-    db.collection("matches").onSnapshot(function(s){
+    var GK = window.GK;
+    if(!GK){ live.ready=true; changed(); return; }
+    live.db = GK.db;
+    GK.db.collection("matches").onSnapshot(function(s){
       MATCHES = s.docs.map(function(d){ var x=d.data()||{}; return { id:d.id, game:x.game, title:x.title||"Match", mode:x.mode||"", team:+x.team||1, map:x.map||"", start:new Date(x.start), fee:+x.fee||0, prize:+x.prize||0, slots:+x.slots||0, filled:0 }; })
         .filter(function(m){ return GAMES[m.game] && !isNaN(m.start.getTime()); })
         .sort(function(a,b){ return a.start-b.start; });
       changed();
     }, oops);
-    db.collection("claims").onSnapshot(function(s){
+    GK.db.collection("claims").onSnapshot(function(s){
       CLAIMS={}; s.docs.forEach(function(d){ CLAIMS[d.id]=d.data(); }); changed();
     }, oops);
-    db.collection("standings").onSnapshot(function(s){
+    GK.db.collection("standings").onSnapshot(function(s){
       STANDINGS = s.docs.map(function(d){ var x=d.data()||{}; return { id:d.id, team:x.team||"", game:x.game, points:+x.points||0 }; })
         .filter(function(r){ return GAMES[r.game]; }).sort(function(a,b){ return b.points-a.points; });
       changed();
     }, oops);
-    if(live.uid){
-      db.doc("bookings/"+live.uid).onSnapshot(function(s){
-        var it = (s.exists && s.data().items) || {};
-        MY = Object.keys(it).map(function(k){ return it[k]; }).sort(function(a,b){ return String(b.at).localeCompare(String(a.at)); });
-        changed();
-      }, oops);
-    }
-    if(live.uid){
-      db.doc("data/users/"+live.uid+"/profile").onSnapshot(function(s){ PROFILE = s.exists ? s.data() : null; changed(); }, oops);
-    }
-    if(live.canAdmin){
-      db.doc("config/organiser").onSnapshot(function(s){ ORGCFG = s.exists ? s.data() : null; ORGLOADED = true; changed(); }, oops);
-      db.collection("bookings").onSnapshot(function(s){
-        ALLB=[]; s.docs.forEach(function(d){ var it=(d.data()||{}).items||{}; Object.keys(it).forEach(function(k){ ALLB.push(it[k]); }); });
-        ALLB.sort(function(a,b){ return String(b.at).localeCompare(String(a.at)); });
-        changed();
-      }, oops);
-    }
-    changed();
+    GK.auth.onAuthStateChanged(userUp);
   } catch(e) { live.ready=true; changed(); }
 }
+
 function stateNote(){
   if(!live.ready) return "Loading live data…";
-  if(!live.db) return "Live data is not available in this view. Open the page from its shared link while signed in.";
+  if(!live.db) return "Live data is not connected. The site owner needs to finish the Firebase setup in firebase-init.js.";
   return "";
 }
 function emptyMatches(){
@@ -152,7 +151,7 @@ function renderNav(){
   $("bar").className = "bar";
   $("bar").innerHTML = '<div class="bar-in"><a class="brand" href="#home" data-route="home" style="text-decoration:none"><img class="logo" src="logo.png" alt="Grand Kizara Esports logo" width="44" height="44"><b>GRAND KIZARA</b><span>ESPORTS</span></a><nav aria-label="Main">'+
     items.map(function(p){ return '<a href="#'+p[0]+'" data-route="'+p[0]+'"'+(p[0]===page?' aria-current="page"':'')+'>'+p[1]+'</a>'; }).join("")+
-    '<span class="livepill'+(live.db?' on':'')+'" title="'+(live.db?'Connected to live data':'Live data not connected')+'"><i></i>'+(live.db?'Live':(live.ready?'Offline':'Connecting'))+'</span></nav>'+(orgUI()?'<div class="orgstrip"><span>Organiser mode \u00B7 only you can see and change this</span><button type="button" data-orglogout>Lock</button></div>':'')+'</div>';
+    '<span class="livepill'+(live.db?' on':'')+'" title="'+(live.db?'Connected to live data':'Live data not connected')+'"><i></i>'+(live.db?'Live':(live.ready?'Offline':'Connecting'))+'</span></nav>'+(orgUI()?'<div class="orgstrip"><span>Organiser mode \u00B7 only you can see and change this</span><button type="button" data-orglogout>Sign out</button></div>':'')+'</div>';
 }
 function renderFooter(){
   $("foot").innerHTML = '<footer><img class="logo" src="logo.png" alt="" width="64" height="64"><div><b style="color:var(--fg)">Grand Kizara Esports</b> runs custom-room tournaments for Free Fire, PUBG and Clash of Clans.</div>'+
@@ -365,17 +364,25 @@ VIEWS.account = {
   mount: function(){
     accSig = "";
     $("view").innerHTML =
-    '<header class="pagehead"><div class="eyebrow">Sign in and sign up</div><h1>Account</h1><p>Your account is your Claude sign-in. Create your player profile once and every booking form fills itself in.</p></header>'+
+    '<header class="pagehead"><div class="eyebrow">Sign in and sign up</div><h1>Account</h1><p>Sign in with Google or your email. Create your player profile once and every booking form fills itself in.</p></header>'+
     '<section style="padding-top:28px" id="accBody"></section>';
   },
   update: function(){
     var el=$("accBody"); if(!el) return;
-    var sig=[live.ready,!!live.db,live.uid,live.name,live.email,orgUI(),JSON.stringify(PROFILE||null)].join("|");
+    var sig=[live.ready,!!live.db,live.uid,live.name,live.email,live.verified,orgUI(),JSON.stringify(PROFILE||null)].join("|");
     if(sig===accSig) return; accSig=sig;
     var n=stateNote();
     if(n){ el.innerHTML='<div class="empty">'+esc(n)+'</div>'; return; }
     if(!live.uid){
-      el.innerHTML='<div class="empty">You are browsing as a guest. Sign in to Claude and open this page from its shared link to book slots, see your bookings and save a player profile.</div>';
+      el.innerHTML='<form id="af" class="loginbox" novalidate>'+
+        '<button class="btn primary" type="button" id="au-google" style="justify-self:start">Continue with Google</button>'+
+        '<div class="hint" style="margin:14px 0">or use your email</div>'+
+        afield("email","Email","email","username")+afield("pw","Password (8+ characters)","password","current-password")+
+        '<div class="err" id="au-err" style="margin-bottom:10px"></div>'+
+        '<div style="display:flex;gap:10px;flex-wrap:wrap"><button class="btn primary" type="submit">Sign in</button>'+
+        '<button class="btn" type="button" id="au-up">Create account</button>'+
+        '<button class="btn" type="button" id="au-reset">Forgot password</button></div></form>';
+      bindAuth();
       return;
     }
     var pr=PROFILE||{}, ids=pr.ids||{};
@@ -384,6 +391,8 @@ VIEWS.account = {
       '<div><div class="accname">'+esc(live.name||"Player")+'</div>'+(live.email?'<div class="accmail">'+esc(live.email)+'</div>':'')+
       '<span class="rolepill'+(orgUI()?' org':'')+'">'+(orgUI()?'Organiser':'Player')+'</span></div></div>'+
       (orgUI() ? '<div class="note" style="margin-top:20px">You are signed in as the organiser. <a href="#admin" data-route="admin" style="color:var(--accent)">Open the organiser console</a> to add matches and results and to check UPI payments.</div>' : '')+
+      '<div style="margin-top:16px"><button class="btn small" type="button" id="au-out">Sign out</button></div>'+
+      (!live.verified ? '<div class="note" style="margin-top:20px">Please verify your email address using the link we sent you. <button class="btn small" type="button" id="au-resend">Resend link</button> <button class="btn small" type="button" id="au-refresh">I have verified</button><div class="err" id="au-err"></div></div>' : '')+
       '<div class="sec-head" style="margin-top:36px"><h2 style="font-size:32px">Player profile</h2></div>'+
       '<form id="pf" class="formgrid" novalidate>'+
         pfield("name","Player name","Your name","")+
@@ -396,8 +405,51 @@ VIEWS.account = {
     $("pf-name").value=pr.name||live.name||""; $("pf-phone").value=pr.phone||"";
     $("pf-ff").value=ids.ff||""; $("pf-pubg").value=ids.pubg||""; $("pf-coc").value=ids.coc||"";
     $("pf").onsubmit=function(e){ e.preventDefault(); saveProfile(); };
+    bindSignedIn();
   }
 };
+
+/* ---------- sign in (Firebase Authentication) ---------- */
+function afield(k,label,type,autoc){
+  return '<div class="field"><label for="au-'+k+'">'+label+'</label><input id="au-'+k+'" type="'+type+'" autocomplete="'+autoc+'"></div>';
+}
+function authErr(m){ var e=$("au-err"); if(e) e.textContent=m||""; }
+function authMsg(e){
+  var c=(e&&e.code)||"";
+  var map={
+    "auth/invalid-email":"That email address is not valid.",
+    "auth/missing-password":"Enter your password.",
+    "auth/weak-password":"Use at least 8 characters.",
+    "auth/email-already-in-use":"An account with this email already exists. Sign in instead.",
+    "auth/invalid-credential":"Email or password is incorrect.",
+    "auth/wrong-password":"Email or password is incorrect.",
+    "auth/user-not-found":"Email or password is incorrect.",
+    "auth/too-many-requests":"Too many attempts. Try again in a few minutes.",
+    "auth/popup-closed-by-user":"",
+    "auth/cancelled-popup-request":"",
+    "auth/unauthorized-domain":"This website address is not allowed yet. Add it under Firebase > Authentication > Settings > Authorized domains."
+  };
+  return (c in map) ? map[c] : "Could not complete that ("+(c||"error")+").";
+}
+function bindAuth(){
+  var A=window.GK.auth;
+  function val(){ return { email:$("au-email").value.trim(), pw:$("au-pw").value }; }
+  $("au-google").onclick=function(){ authErr(""); A.signInWithPopup(new firebase.auth.GoogleAuthProvider()).catch(function(e){ authErr(authMsg(e)); }); };
+  $("af").onsubmit=function(e){ e.preventDefault(); var v=val(); authErr("");
+    A.signInWithEmailAndPassword(v.email,v.pw).catch(function(x){ authErr(authMsg(x)); }); };
+  $("au-up").onclick=function(){ var v=val(); authErr("");
+    if(v.pw.length<8){ authErr("Use at least 8 characters."); return; }
+    A.createUserWithEmailAndPassword(v.email,v.pw).then(function(c){ return c.user.sendEmailVerification(); }).then(function(){ toast("Account created. Check your email to verify it."); }).catch(function(x){ authErr(authMsg(x)); }); };
+  $("au-reset").onclick=function(){ var v=val(); authErr("");
+    if(!v.email){ authErr("Enter your email first."); return; }
+    A.sendPasswordResetEmail(v.email).then(function(){ toast("Password reset email sent"); }).catch(function(x){ authErr(authMsg(x)); }); };
+}
+function bindSignedIn(){
+  var A=window.GK.auth;
+  $("au-out").onclick=function(){ A.signOut(); go("home"); };
+  if($("au-resend")) $("au-resend").onclick=function(){ var u=A.currentUser; if(u) u.sendEmailVerification().then(function(){ toast("Verification email sent"); }).catch(function(x){ authErr(authMsg(x)); }); };
+  if($("au-refresh")) $("au-refresh").onclick=function(){ var u=A.currentUser; if(!u) return; u.reload().then(function(){ return u.getIdToken(true); }).then(function(){ userUp(A.currentUser); }).catch(function(x){ authErr(authMsg(x)); }); };
+}
 function saveProfile(){
   var v=function(k){ return $("pf-"+k).value.trim(); }, ok=true;
   function bad(k,m){ $("pferr-"+k).textContent=m||""; if(m) ok=false; }
@@ -408,67 +460,11 @@ function saveProfile(){
   bad("coc", v("coc") && !/^#[0289PYLQGRJCUV]{3,12}$/i.test(v("coc")) ? "Enter a valid tag starting with #." : "");
   if(!ok) return;
   $("pf-err").textContent="";
-  live.db.doc("data/users/"+live.uid+"/profile").set({ name:v("name"), phone:v("phone"), ids:{ ff:v("ff"), pubg:v("pubg"), coc:v("coc") } })
+  live.db.doc("profiles/"+live.uid).set({ name:v("name"), phone:v("phone"), ids:{ ff:v("ff"), pubg:v("pubg"), coc:v("coc") } })
     .then(function(){ toast("Profile saved"); }, function(e){ $("pf-err").textContent="Could not save: "+((e&&e.code)||"error"); });
 }
 
-var orgSig = "", orgFails = 0, orgLockUntil = 0;
-function b64(bytes){ return btoa(String.fromCharCode.apply(null, bytes)); }
-async function hashPw(pw, saltB64, iter){
-  var salt = Uint8Array.from(atob(saltB64), function(c){ return c.charCodeAt(0); });
-  var key = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveBits"]);
-  var bits = await crypto.subtle.deriveBits({ name:"PBKDF2", salt:salt, iterations:iter, hash:"SHA-256" }, key, 256);
-  return b64(new Uint8Array(bits));
-}
-function sameText(a,b){ if(a.length!==b.length) return false; var d=0; for(var i=0;i<a.length;i++) d|=a.charCodeAt(i)^b.charCodeAt(i); return d===0; }
-function lfield(k,label,type,ph){
-  return '<div class="field"><label for="ol-'+k+'">'+label+'</label><input id="ol-'+k+'" type="'+type+'" placeholder="'+ph+'" autocomplete="'+(type==="password"?"current-password":"username")+'"></div>';
-}
-function orgLoginScreen(){
-  orgSig = [ORGLOADED,!!ORGCFG].join("|");
-  var el=$("view");
-  if(!ORGLOADED){ el.innerHTML='<header class="pagehead"><div class="eyebrow">Organiser</div><h1>Organiser login</h1></header><section style="padding-top:28px"><div class="empty">Loading...</div></section>'; return; }
-  var setup = !ORGCFG;
-  el.innerHTML =
-    '<header class="pagehead"><div class="eyebrow">Organiser</div><h1>'+(setup?'Set up organiser login':'Organiser login')+'</h1><p>'+
-    (setup ? 'Choose the password you will use to open the organiser console. Only a salted hash of it is stored, never the password itself.' : 'Enter your organiser email and password to open the console.')+'</p></header>'+
-    '<section style="padding-top:28px"><form id="ol" class="loginbox" novalidate>'+
-    lfield("email","Organiser email","email","your email")+
-    lfield("pw",setup?"Choose a password":"Password","password","")+
-    (setup ? lfield("pw2","Confirm password","password","")+'<div class="hint" style="margin:-6px 0 12px">At least 8 characters. Do not reuse a password you have shared anywhere.</div>' : '')+
-    '<div class="err" id="ol-err" style="margin-bottom:10px"></div>'+
-    '<button class="btn primary" type="submit" style="justify-self:start">'+(setup?'Create organiser login':'Log in')+'</button></form></section>';
-  $("ol").onsubmit = function(e){ e.preventDefault(); if(setup) orgSetup(); else orgLogin(); };
-}
-function orgErr(m){ var e=$("ol-err"); if(e) e.textContent=m||""; }
-async function orgSetup(){
-  var email=$("ol-email").value.trim().toLowerCase(), pw=$("ol-pw").value, pw2=$("ol-pw2").value;
-  if(email!==ORG_EMAIL){ orgErr("This organiser login is reserved for the organiser's own email."); return; }
-  if(pw.length<8){ orgErr("Use at least 8 characters."); return; }
-  if(pw!==pw2){ orgErr("The two passwords do not match."); return; }
-  if(!(window.crypto && crypto.subtle)){ orgErr("This browser cannot create a secure login. Try another browser."); return; }
-  orgErr("Creating...");
-  try {
-    var salt = new Uint8Array(16); crypto.getRandomValues(salt); var saltB = b64(salt), iter = 150000;
-    var hash = await hashPw(pw, saltB, iter);
-    await live.db.doc("config/organiser").set({ email:email, salt:saltB, iter:iter, hash:hash });
-    live.unlocked = true; toast("Organiser login created"); renderNav(); go("admin");
-  } catch(e) { orgErr("Could not create the login ("+((e&&e.code)||"error")+")."); }
-}
-async function orgLogin(){
-  var now=Date.now();
-  if(now<orgLockUntil){ orgErr("Too many attempts. Try again in "+Math.ceil((orgLockUntil-now)/1000)+" seconds."); return; }
-  var email=$("ol-email").value.trim().toLowerCase(), pw=$("ol-pw").value;
-  if(!(window.crypto && crypto.subtle)){ orgErr("This browser cannot check the login. Try another browser."); return; }
-  orgErr("Checking...");
-  var ok=false;
-  try { var h=await hashPw(pw, ORGCFG.salt, ORGCFG.iter||150000); ok = email===ORGCFG.email && sameText(h, ORGCFG.hash); } catch(e) { ok=false; }
-  if(ok){ orgFails=0; live.unlocked=true; renderNav(); go("admin"); return; }
-  orgFails++; if(orgFails>=5){ orgLockUntil=Date.now()+60000; orgFails=0; orgErr("Too many attempts. Try again in 60 seconds."); return; }
-  orgErr("Email or password is incorrect.");
-}
-
-/* organiser console: only for the account that owns this page, after the organiser login */
+/* organiser console: only for the verified organiser account (enforced by firestore.rules) */
 
 
 VIEWS.admin = {
@@ -476,11 +472,6 @@ VIEWS.admin = {
     if(!live.canAdmin){
       $("view").innerHTML='<header class="pagehead"><div class="eyebrow">Organiser</div><h1>Organiser console</h1><p>'+(live.ready?'This page is only for the organiser of Grand Kizara Esports.':'Loading…')+'</p></header>';
       view = { update:function(){ if(live.canAdmin && route.split("-")[0]==="admin") go("admin",true); } };
-      return;
-    }
-    if(!live.unlocked){
-      orgLoginScreen();
-      view = { update:function(){ if(live.unlocked){ go("admin",true); return; } if([ORGLOADED,!!ORGCFG].join("|")!==orgSig) orgLoginScreen(); } };
       return;
     }
     view = VIEWS.admin;
@@ -537,7 +528,7 @@ function actionBtns(b){
   return '<button class="btn small" data-pay="ok:'+k+'">Mark paid</button> <button class="btn small" data-pay="no:'+k+'">Reject</button>';
 }
 function adminClick(e){
-  if(e.target.closest("[data-orglogout]")){ live.unlocked=false; renderNav(); go("home"); return true; }
+  if(e.target.closest("[data-orglogout]")){ window.GK.auth.signOut(); go("home"); return true; }
   var d=e.target.closest("[data-del]");
   if(d){
     if(d.getAttribute("data-armed")!=="1"){ d.setAttribute("data-armed","1"); d.textContent="Click again to delete"; setTimeout(function(){ if(d.isConnected){ d.removeAttribute("data-armed"); d.textContent="Delete"; } },3000); return true; }
@@ -550,11 +541,7 @@ function adminClick(e){
 }
 async function setPayStatus(uid, id, status){
   try {
-    var ref=live.db.doc("bookings/"+uid), snap=await ref.get();
-    var items=Object.assign({}, (snap.exists && snap.data().items) || {});
-    if(!items[id]) return;
-    items[id]=Object.assign({}, items[id], { status:status });
-    await ref.set({ items:items });
+    await live.db.doc("bookings/"+id).update({ status:status });
     if(status==="rejected"){ try { await live.db.doc("claims/"+id).delete(); } catch(e) {} }
     toast(status==="paid" ? "Marked paid" : "Booking rejected, slots released");
   } catch(e) { toast("Could not update: "+((e&&e.code)||"error")); }
@@ -730,13 +717,11 @@ async function completeBooking(){
   var rec={ id:id, uid:live.uid, matchId:m.id, title:m.title, game:m.game, whenText:when(m.start), team:(form.team||form.player)+(qty>1?' +'+(qty-1)+' more':''), player:form.player, ign:form.ign, phone:form.phone, sub:form.sub||"", extra:form.extra||"", qty:qty, fee:m.fee*qty, method:"upi", payment:"upi", utr:form.utr, status:"pending", at:at };
   var claimRef=live.db.doc("claims/"+id), claimed=false;
   try {
-    await claimRef.set({ matchId:m.id, qty:qty, at:at }); claimed=true;
-    var ref=live.db.doc("bookings/"+live.uid), snap=await ref.get();
-    var items=Object.assign({}, (snap.exists && snap.data().items) || {}); items[id]=rec;
-    await ref.set({ items:items });
+    await claimRef.set({ matchId:m.id, qty:qty, at:at, uid:live.uid }); claimed=true;
+    await live.db.doc("bookings/"+id).set(rec);
   } catch(e) {
     if(claimed){ try { await claimRef.delete(); } catch(x) {} }
-    fail(e && e.code==="invalid_argument" ? "Your access level does not allow booking. Ask the organiser for Contributor access." : "Could not save your booking ("+((e&&e.code)||"error")+"). Please try again.");
+    fail(e && e.code==="permission-denied" ? "You need to be signed in to book. Sign in from the Account page." : "Could not save your booking ("+((e&&e.code)||"error")+"). Please try again.");
     return;
   }
   step=3; renderPanel();
